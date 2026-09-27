@@ -1,0 +1,36 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: training-crm
+  datasource:
+    url: jdbc:h2:mem:trainingdb;DB_CLOSE_DELAY=-1;MODE=LEGACY
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: create-drop
+    open-in-view: false
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      timeout: 3s
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+
+app:
+  commission-rate: 0.05          # 顾问提成比例
+  complaint-compensation: 200    # 每条未结投诉在退费时的赔付金额
+  absent-consumes-lesson: true   # 缺席是否照常扣课时
+
+logging:
+  level:
+    root: info
