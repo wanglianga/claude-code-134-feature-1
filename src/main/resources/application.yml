@@ -30,6 +30,17 @@ app:
   commission-rate: 0.05          # 顾问提成比例
   complaint-compensation: 200    # 每条未结投诉在退费时的赔付金额
   absent-consumes-lesson: true   # 缺席是否照常扣课时
+  trial:
+    near-start-hours: 24         # 距开课不足该小时数视为"临近开课"
+    supervisor-approval-count: 3 # 第几次改约起需顾问主管审批
+    hot-teacher-weekly-slots: 3  # 老师未来7天试听位达到该数视为热门老师
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: alpha
 
 logging:
   level:

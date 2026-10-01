@@ -174,4 +174,8 @@ class PrincipalController(private val principalService: PrincipalService) {
     /** 经营概览 */
     @GetMapping("/overview")
     fun overview() = principalService.overview()
+
+    /** 试听反馈影响线索转化的统计：按测评分数段/改约次数/风险提醒/容量回收分组 */
+    @GetMapping("/conversion-stats")
+    fun conversionStats() = principalService.conversionStats()
 }

@@ -50,7 +50,7 @@ class GlobalExceptionHandler {
 
     @ExceptionHandler(BusinessException::class)
     fun biz(e: BusinessException): ResponseEntity<Map<String, Any>> =
-        ResponseEntity.status(HttpStatus.BAD_REQUEST)
+        ResponseEntity.status(e.status)
             .body(mapOf("error" to e.code, "message" to e.message))
 
     @ExceptionHandler(MethodArgumentNotValidException::class)

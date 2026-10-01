@@ -23,6 +23,7 @@ class ConversionService(
     private val commissionRepo: CommissionRepo,
     private val trialClassRepo: TrialClassRepo,
     private val trialFeedbackRepo: TrialFeedbackRepo,
+    private val rescheduleRecordRepo: TrialRescheduleRecordRepo,
     private val promiseRecordRepo: PromiseRecordRepo,
     private val channelFeeRepo: ChannelFeeRepo,
     private val auditService: AuditService,
@@ -126,6 +127,21 @@ class ConversionService(
         auditService.record("COMMISSION_ACCRUED", "顾问提成计提：¥${commission.amount}（顾问=${lead.consultantId}）", studentId = student.id, leadId = lead.id, actor = actor)
         req.promises.forEach { auditService.record("PROMISE_RECORDED", "合同承诺：$it", studentId = student.id, leadId = lead.id, actor = actor) }
         warnings.forEach { auditService.record("CONSISTENCY_WARNING", "一致性告警：$it", studentId = student.id, leadId = lead.id, actor = actor) }
+
+        // ---- 试听信号对该线索转化的影响（反馈分数/改约次数/容量被候补占用） ----
+        val convertedTrials = trialClassRepo.findByLeadId(lead.id)
+        val latestFeedback = convertedTrials.mapNotNull { trialFeedbackRepo.findByTrialClassId(it.id) }
+            .maxByOrNull { it.createdAt }
+        val rescheduleRecords = rescheduleRecordRepo.findByLeadIdOrderByCreatedAtAsc(lead.id)
+        if (latestFeedback != null) {
+            auditService.record(
+                "TRIAL_SIGNAL_ON_CONVERSION",
+                "试听信号计入转化统计：测评=${latestFeedback.assessmentScore}分，适合班型=${latestFeedback.suitableClassType}，" +
+                    "风险提醒=${latestFeedback.riskWarning ?: "无"}，累计改约次数=${rescheduleRecords.size}（其中主管审批=${rescheduleRecords.count { it.supervisorApproved }}），" +
+                    "释放容量曾被候补补位=${rescheduleRecords.any { it.slotTakenByWaitlist }}",
+                studentId = student.id, leadId = lead.id, actor = actor
+            )
+        }
 
         return ConvertResult(student, contract, installments, invoice, commission, warnings)
     }

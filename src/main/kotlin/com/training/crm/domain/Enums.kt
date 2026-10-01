@@ -15,6 +15,12 @@ enum class LeadStatus { NEW, TRIAL_SCHEDULED, TRIAL_DONE, CONVERTED, LOST }
 /** 试听课状态 */
 enum class TrialStatus { SCHEDULED, ATTENDED, ABSENT, CANCELLED_TEACHER_LEAVE, CANCELLED }
 
+/** 候补状态：排队中 → 已补位（占用了他人释放的试听位）/ 已取消 / 已过期 */
+enum class WaitlistStatus { WAITING, PROMOTED, CANCELLED, EXPIRED }
+
+/** 第 3 次及以上改约的主管审批状态：待审批 → 批准 / 驳回 */
+enum class RescheduleApprovalStatus { PENDING, APPROVED, REJECTED }
+
 /** 学员状态 */
 enum class StudentStatus { ACTIVE, SUSPENDED, REFUNDED, GRADUATED }
 

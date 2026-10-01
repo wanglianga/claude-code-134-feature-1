@@ -27,6 +27,12 @@ class LeadService(
     private val channelFeeRepo: ChannelFeeRepo,
     private val promiseRecordRepo: PromiseRecordRepo,
     private val giftRecordRepo: GiftRecordRepo,
+    private val trialClassRepo: TrialClassRepo,
+    private val trialFeedbackRepo: TrialFeedbackRepo,
+    private val rescheduleRecordRepo: TrialRescheduleRecordRepo,
+    private val waitlistRepo: TrialWaitlistRepo,
+    private val rescheduleApprovalRepo: RescheduleApprovalRepo,
+    private val auditEventRepo: AuditEventRepo,
     private val lockService: LockService,
     private val auditService: AuditService
 ) {
@@ -113,6 +119,28 @@ class LeadService(
         }
         auditService.record("LEAD_LOST", "线索流失：$reason", leadId = lead.id, actor = actor)
         return leadRepo.save(lead)
+    }
+
+    /**
+     * 线索事件流：试听课、改约记录（原因/临近开课/确认/审批/容量补位）、
+     * 候补状态、试听反馈与履约审计事件，供顾问与老师跟进。
+     */
+    fun events(leadId: Long): Map<String, Any?> {
+        val lead = get(leadId)
+        val trials = trialClassRepo.findByLeadId(leadId)
+        val trialIds = trials.map { it.id }
+        return mapOf(
+            "lead" to lead,
+            "trials" to trials,
+            "rescheduleRecords" to rescheduleRecordRepo.findByLeadIdOrderByCreatedAtAsc(leadId),
+            "waitlist" to waitlistRepo.findByLeadId(leadId),
+            "pendingRescheduleApprovals" to trialIds.mapNotNull {
+                rescheduleApprovalRepo.findByTrialClassIdAndStatus(it, RescheduleApprovalStatus.PENDING)
+            },
+            "feedbacks" to trialIds.mapNotNull { trialFeedbackRepo.findByTrialClassId(it) },
+            "auditEvents" to auditEventRepo.findByLeadIdOrderByCreatedAtAsc(leadId)
+                .map { mapOf("time" to it.createdAt, "type" to it.eventType, "detail" to it.detail, "actor" to it.actor) }
+        )
     }
 
     fun get(leadId: Long): Lead =

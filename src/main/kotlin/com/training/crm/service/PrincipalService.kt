@@ -25,7 +25,11 @@ class PrincipalService(
     private val enrollmentRepo: EnrollmentRepo,
     private val clazzRepo: ClazzRepo,
     private val campusRepo: CampusRepo,
-    private val consultantRepo: ConsultantRepo
+    private val consultantRepo: ConsultantRepo,
+    private val trialClassRepo: TrialClassRepo,
+    private val trialFeedbackRepo: TrialFeedbackRepo,
+    private val rescheduleRecordRepo: TrialRescheduleRecordRepo,
+    private val waitlistRepo: TrialWaitlistRepo
 ) {
 
     /**
@@ -110,6 +114,92 @@ class PrincipalService(
             "channelCosts" to leads.flatMap { channelFeeRepo.findByLeadId(it.id) }
                 .groupBy { it.channel }
                 .mapValues { entry -> entry.value.fold(BigDecimal.ZERO) { a, f -> a.add(f.amount) } }
+        )
+    }
+
+    /**
+     * 试听反馈 → 线索转化统计。
+     * - 按测评分数段（<60 / 60-74 / 75-89 / >=90）统计试听完成数、转化数、流失数、转化率；
+     * - 按改约次数（0 / 1-2 / >=3 次含主管审批）统计转化情况；
+     * - 风险提醒对转化的影响、临近开课改约、容量被候补占用的转化情况。
+     */
+    fun conversionStats(): Map<String, Any?> {
+        val leads = leadRepo.findAll()
+        // 每条线索取其最近一次有反馈的试听；改约统计按线索下所有试听课汇总
+        data class Row(
+            val lead: Lead,
+            val trial: TrialClass,
+            val feedback: TrialFeedback,
+            val rescheduleTotal: Int,
+            val slotReclaimed: Boolean,
+            val nearStart: Boolean
+        )
+        val allRecords = rescheduleRecordRepo.findAll()
+        val rows = leads.mapNotNull { lead ->
+            val trials = trialClassRepo.findByLeadId(lead.id)
+            val withFeedback = trials.mapNotNull { t ->
+                trialFeedbackRepo.findByTrialClassId(t.id)?.let { t to it }
+            }
+            val leadRecords = allRecords.filter { it.leadId == lead.id }
+            withFeedback.maxByOrNull { it.second.createdAt }?.let { (t, f) ->
+                Row(
+                    lead = lead,
+                    trial = t,
+                    feedback = f,
+                    rescheduleTotal = leadRecords.size,
+                    slotReclaimed = leadRecords.any { it.slotTakenByWaitlist },
+                    nearStart = leadRecords.any { it.nearStart }
+                )
+            }
+        }
+
+        fun bucket(score: Int): String = when {
+            score < 60 -> "score_lt_60"
+            score < 75 -> "score_60_74"
+            score < 90 -> "score_75_89"
+            else -> "score_ge_90"
+        }
+
+        fun summarize(group: List<Row>): Map<String, Any?> {
+            val converted = group.count { it.lead.status == LeadStatus.CONVERTED }
+            val lost = group.count { it.lead.status == LeadStatus.LOST }
+            val done = group.size
+            return mapOf(
+                "trialDone" to done,
+                "converted" to converted,
+                "lost" to lost,
+                "pending" to (done - converted - lost),
+                "conversionRate" to if (done == 0) 0.0 else Math.round(converted * 10000.0 / done) / 100.0
+            )
+        }
+
+        val byScore = rows.groupBy { bucket(it.feedback.assessmentScore) }
+            .mapValues { summarize(it.value) }
+        val byReschedule = rows.groupBy { r ->
+            when {
+                r.rescheduleTotal >= 3 -> "reschedule_ge_3_supervisor"
+                r.rescheduleTotal >= 1 -> "reschedule_1_2"
+                else -> "reschedule_0"
+            }
+        }.mapValues { summarize(it.value) }
+
+        val withRisk = rows.filter { !it.feedback.riskWarning.isNullOrBlank() }
+
+        return mapOf(
+            "totalTrialsScheduled" to trialClassRepo.findAll().size,
+            "totalTrialsAttended" to trialClassRepo.findAll().count {
+                it.status == TrialStatus.ATTENDED || trialFeedbackRepo.findByTrialClassId(it.id) != null
+            },
+            "waitlist" to mapOf(
+                "waiting" to waitlistRepo.findAll().count { it.status == WaitlistStatus.WAITING },
+                "promoted" to waitlistRepo.findAll().count { it.status == WaitlistStatus.PROMOTED }
+            ),
+            "byAssessmentScore" to byScore,
+            "byRescheduleCount" to byReschedule,
+            "riskWarningImpact" to summarize(withRisk),
+            "nearStartRescheduleImpact" to summarize(rows.filter { it.nearStart }),
+            "slotReclaimedRequeueImpact" to summarize(rows.filter { it.slotReclaimed }),
+            "overall" to summarize(rows)
         )
     }
 }

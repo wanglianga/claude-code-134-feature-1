@@ -30,6 +30,27 @@ class LockService(private val redis: StringRedisTemplate) {
         }
     }
 
+    /** 依次获取多把锁（调用方应保证 key 全局有序，避免死锁）；任一把获取失败释放已持有的锁 */
+    fun <T> withLocks(keys: List<String>, ttlSeconds: Long = 15, block: () -> T): T {
+        val held = mutableListOf<Pair<String, String>>()
+        try {
+            keys.forEach { key ->
+                val lockKey = "lock:$key"
+                val token = UUID.randomUUID().toString()
+                val acquired = redis.opsForValue().setIfAbsent(lockKey, token, Duration.ofSeconds(ttlSeconds)) ?: false
+                if (!acquired) {
+                    bizFail("RESOURCE_LOCKED", "资源已被占用，请稍后重试（$key）")
+                }
+                held.add(lockKey to token)
+            }
+            return block()
+        } finally {
+            held.reversed().forEach { (lockKey, token) ->
+                if (redis.opsForValue().get(lockKey) == token) redis.delete(lockKey)
+            }
+        }
+    }
+
     /**
      * 幂等执行：同一 idemKey 在 ttl 内只会真正执行一次。
      * 首次执行把结果 id 写入 Redis；重复请求直接返回已存在的 id。
