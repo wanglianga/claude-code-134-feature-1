@@ -27,6 +27,7 @@ class LeadService(
     private val channelFeeRepo: ChannelFeeRepo,
     private val promiseRecordRepo: PromiseRecordRepo,
     private val giftRecordRepo: GiftRecordRepo,
+    private val concernRecordRepo: ParentConcernRepo,
     private val lockService: LockService,
     private val auditService: AuditService
 ) {
@@ -53,9 +54,15 @@ class LeadService(
                     consultantId = req.consultantId,
                     campusId = req.campusId,
                     joinedActivity = req.joinedActivity,
+                    parentConcern = req.parentConcern,
                     remark = req.remark
                 )
             )
+            // 家长关注点（创建线索时即可登记）
+            if (!req.parentConcern.isNullOrBlank()) {
+                concernRecordRepo.save(ParentConcern(leadId = lead.id, content = req.parentConcern, createdBy = actor))
+                auditService.record("PARENT_CONCERN_RECORDED", "家长关注点：${req.parentConcern}", leadId = lead.id, actor = actor)
+            }
             // 渠道费用登记
             val cost = CHANNEL_COSTS[req.sourceChannel] ?: BigDecimal("100")
             channelFeeRepo.save(ChannelFee(channel = req.sourceChannel, leadId = lead.id, amount = cost))
@@ -130,5 +137,6 @@ data class LeadCreateReq(
     val consultantId: Long,
     val campusId: Long,
     val joinedActivity: Boolean = false,
+    val parentConcern: String? = null,
     val remark: String? = null
 )

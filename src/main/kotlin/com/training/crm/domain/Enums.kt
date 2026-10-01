@@ -15,6 +15,15 @@ enum class LeadStatus { NEW, TRIAL_SCHEDULED, TRIAL_DONE, CONVERTED, LOST }
 /** 试听课状态 */
 enum class TrialStatus { SCHEDULED, ATTENDED, ABSENT, CANCELLED_TEACHER_LEAVE, CANCELLED }
 
+/** 候补状态：排队中 / 已用释放档位转正 / 已转订其他时段 / 已取消 */
+enum class WaitlistStatus { WAITING, PROMOTED, BOOKED_ELSEWHERE, CANCELLED }
+
+/** 第三次改约的主管审批状态：待审批 / 通过 / 驳回 */
+enum class TrialApprovalStatus { PENDING, APPROVED, REJECTED }
+
+/** 试听反馈对线索转化的影响：正向 / 中性 / 负向（负向反馈计入转化风险统计） */
+enum class ConversionImpact { POSITIVE, NEUTRAL, NEGATIVE }
+
 /** 学员状态 */
 enum class StudentStatus { ACTIVE, SUSPENDED, REFUNDED, GRADUATED }
 

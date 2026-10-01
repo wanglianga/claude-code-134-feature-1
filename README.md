@@ -7,6 +7,16 @@
 
 ## 一、本地启动
 
+### 方式 A：Docker 一键启动（推荐）
+
+```bash
+docker compose up --build
+```
+
+自动启动 `training-crm`（8080）+ Redis（6379）两个容器，应用就绪后访问 `http://localhost:8080`。
+
+### 方式 B：本机运行
+
 ```bash
 # 1. 启动 Redis（默认 localhost:6379，可用 REDIS_HOST/REDIS_PORT 覆盖）
 redis-server --daemonize yes
@@ -18,6 +28,11 @@ mvn package -DskipTests && java -jar target/training-crm-1.0.0.jar
 ```
 
 应用监听 `http://localhost:8080`。H2 为内存库，重启后数据重置并重新播种；H2 控制台：`/h2-console`（JDBC URL `jdbc:h2:mem:trainingdb`，用户 `sa`，空密码）。
+
+接口文档（纯后端服务，提供 OpenAPI 3.x + Swagger UI）：
+
+- Swagger UI：`http://localhost:8080/swagger-ui.html`
+- OpenAPI JSON：`http://localhost:8080/v3/api-docs`
 
 ## 二、测试账号（角色）
 
@@ -46,6 +61,15 @@ mvn package -DskipTests && java -jar target/training-crm-1.0.0.jar
 
 **试听排班匹配**（`POST /api/trials/book`）：自动匹配 ①老师科目=线索目标科目 ②老师在线索校区可授课（多校区共享）③老师空档覆盖整个时段 ④老师/教室时段无冲突；教材版本按科目默认，试听水平=学生基础水平。老师+时段、教室+时段用 Redis 锁防并发双订。
 
+**多次改约容量回收**（`POST /api/trials/{id}/reschedule`）：
+
+- 每次改约生成一条改约快照（`TrialRescheduleRecord`），记录改约原因、是否临近开课（距开课 ≤ `app.trial-near-start-hours`，默认 24h）、顾问确认情况（`consultantConfirmed` + 操作人），并在同一事务内释放原老师与原教室档期；
+- **第 1、2 次**改约直接生效；**第 3 次（含）起**不直接执行，返回 `PENDING_APPROVAL` 生成主管审批单，仅主管（`PRINCIPAL`/`ADMIN`）可通过 `/api/trials/reschedule-approvals/{id}/decision` 决策，通过后才真正释放/重排容量，驳回则维持原档期——避免热门老师试听位被长期占用；
+- **候补联动**：`POST /api/trials/waitlist` 可对已满时段排队。改约/老师请假释放档期时，按入队顺序把时段（及意向老师/教室）完全匹配的候补队首自动提升为正式试听（`TRIAL_WAITLIST_PROMOTED`）；
+- **重新排队**：若释放的档位被候补占用，原家长再次直接选择该时段会被拦截（`SLOT_TAKEN_REQUEUE`），须重新候补；改约记录标记 `releasedSlotTakenByWaitlist`，试听标记 `releasedSlotTaken`；
+- **老师课前视图**（`GET /api/trials/{id}/briefing`）：学生到课后老师可见完整改约历史（原因/临近开课/顾问确认/审批/释放档被候补占用）与家长关注点（`POST /api/leads/{id}/concerns` 或建线索时带 `parentConcern`）；
+- **反馈影响转化统计**：试听反馈带 `conversionImpact`（POSITIVE/NEUTRAL/NEGATIVE，不传则按测评分数与风险提醒推断），负向反馈抬高线索风险；`GET /api/trials/conversion-stats` 按反馈影响、累计改约次数、档位被回收维度统计转化率；`GET /api/trials/risks` 为顾问端容量变化转化风险视图（含待主管审批项）。
+
 **课消规则**（`POST /api/courses/lessons/{id}/complete`）：到课扣 1 课时；缺席照常扣课时（`app.absent-consumes-lesson`）；已批准请假不扣课时，事后批准会返还已扣课时；扣课顺序按合同 `consumeOrder`（先付费 PAID_FIRST / 先赠课 GIFT_FIRST），付费课时耗尽后扣赠课，余额不足记告警事件。
 
 **退费计算**（`GET /api/refunds/preview/{studentId}` 试算 / `POST /api/refunds` 申请）：
@@ -71,8 +95,8 @@ mvn package -DskipTests && java -jar target/training-crm-1.0.0.jar
 | 模块 | 接口 |
 |---|---|
 | 基础数据 | `POST/GET /api/setup/campuses|classrooms|teachers|consultants|packages|classes`，`POST /api/setup/teachers/{id}/availability` |
-| 线索 | `POST /api/leads`（幂等）、`POST /api/leads/{id}/campus`（试听后换校区）、`POST /api/leads/{id}/promises`（家长承诺）、`POST /api/leads/{id}/lost` |
-| 试听 | `POST /api/trials/book`、`/{id}/reschedule`（多次改约记风险）、`/{id}/attend`（参加活动发赠品）、`/{id}/absent`、`/{id}/teacher-leave`、`/{id}/feedback` |
+| 线索 | `POST /api/leads`（幂等，可带 parentConcern）、`POST /api/leads/{id}/campus`（试听后换校区）、`POST /api/leads/{id}/promises`（家长承诺）、`POST /api/leads/{id}/concerns`（家长关注点）、`POST /api/leads/{id}/lost` |
+| 试听 | `POST /api/trials/book`、`POST /api/trials/waitlist`（候补排队）、`/waitlist/{id}/cancel`、`/{id}/reschedule`（前2次直接生效/第3次起走主管审批）、`GET /reschedule-approvals`、`POST /reschedule-approvals/{id}/decision`（仅主管）、`GET /{id}/briefing`（老师课前视图）、`GET /risks`（顾问风险）、`GET /conversion-stats`（反馈影响转化统计）、`/{id}/attend`（参加活动发赠品）、`/{id}/absent`、`/{id}/teacher-leave`、`/{id}/feedback`（可带 conversionImpact） |
 | 转化 | `POST /api/conversions`（合同+分期+发票+提成+承诺+一致性校验）、`POST /api/conversions/installments/{id}/pay` |
 | 排课课消 | `POST /api/courses/classes/{id}/enroll`（容量校验/插班标记）、`POST /api/courses/lessons`、`POST /api/courses/lessons/{id}/complete`、`POST /api/courses/lessons/{id}/teacher-leave`、`GET /api/courses/contracts/{id}/consumption` |
 | 学员异动 | `POST /api/students/{id}/leave`、`POST /api/students/leave-requests/{id}/approve|reject`、`POST /api/students/{id}/transfer`（转班/跨校区）、`POST /api/students/{id}/suspend|resume`、`POST /api/students/{id}/complaints` |
@@ -87,11 +111,14 @@ bash scripts/verify.sh        # 需应用已启动；BASE 环境变量可改地�
 
 > 请在**全新启动**的应用上运行（H2 为内存库，重启即重置为种子数据）；脚本会自行清理其使用的 Redis 幂等键。
 
-脚本用 curl+jq 跑通 3 条学员主线共 90 项断言：
+脚本用 curl+jq 跑通 3 条学员主线 + 多次改约容量回收专项，共 149 项断言：
 
-1. **小明**：线索(幂等)→承诺→试听(时段冲突拦截/改约3次触发风险/老师请假/重约/到课发赠品)→反馈→报名(一致性拦截→强制确认,3条告警)→3期分期回款→入班→3节课(2到课1缺席扣课时)→请假批准返还课时→跨校区转班→停课/复课→投诉→退费试算(已上2课时,单价187.5,基础退费8625,教材费-300,优惠回收-600,投诉赔付+200,提成冻结450,**应退7925**)→审批打款→提成追回；
-2. **小红**：英语线索→试听缺席→重约→转化(无告警)→2期分期只回1期→退费**以已收4400为上限**、未付分期减免；
-3. **小刚**：2付费+1赠课小包→插班(中途入班标记)→4节课→**课消付费2+赠课1**、第4节余额不足告警；
-4. 另验证：鉴权 401/403、排课老师时段冲突、校长轨迹 28 类事件齐全、经营概览。
+1. **小明**：线索(幂等/家长关注点)→承诺→试听(时段冲突拦截)→**前2次改约直接生效、第3次改约主管审批(顾问403/待审批禁重复提交/主管批准后才释放容量)**→老师请假/重约/到课发赠品→**老师课前视图跨试听看到3条改约历史(原因/临近开课/顾问确认/审批单)+家长关注点**→反馈(负向影响推断)→报名(一致性拦截→强制确认,3条告警)→3期分期回款→入班→3节课(2到课1缺席扣课时)→请假批准返还课时→跨校区转班→停课/复课→投诉→退费试算(已上2课时,单价187.5,基础退费8625,教材费-300,优惠回收-600,投诉赔付+200,提成冻结450,**应退7925**)→审批打款→提成追回；
+2. **容量回收专项**：满档时段直接预约被拦截→加入候补(重复候补/空档时段拒绝候补)→持有人改约释放档期→**候补队首自动转正占档(老师/教室/时段一致)**→**原家长再选该时段被拦截需重新排队**→取消候补→**顾问端风险视图可见容量变化风险**；另验证第3次改约被主管**驳回维持原档期**、驳回后可重新提交；以及 24h 内**临近开课改约**留痕；
+3. **小红**：英语线索→到课反馈(高分推断**正向影响**)→转化(无告警)→2期分期只回1期→退费**以已收4400为上限**、未付分期减免；
+4. **小刚**：2付费+1赠课小包→插班(中途入班标记)→4节课→**课消付费2+赠课1**、第4节余额不足告警；
+5. **转化统计**：`/api/trials/conversion-stats` 按反馈影响(POSITIVE/NEGATIVE)、累计改约次数(0-1/2/3+)、档位被回收维度给出转化率；
+6. 另验证：鉴权 401/403、审批接口主管鉴权、排课老师时段冲突、校长轨迹事件齐全、经营概览。
 
-**最近一次执行结果（2026-09-25，本机）：`通过 90 项，失败 0 项`，VERIFY_RESULT: PASS。**
+**最近一次执行结果（2026-10-01，本机，全新启动应用）：`通过 149 项，失败 0 项`，VERIFY_RESULT: PASS。**
+Swagger UI 与 OpenAPI（`/swagger-ui.html`、`/v3/api-docs`，49 个接口路径）实测可访问。

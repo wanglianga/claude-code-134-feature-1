@@ -27,6 +27,8 @@ class Lead(
     var joinedActivity: Boolean = false,
     @Enumerated(EnumType.STRING)
     var status: LeadStatus = LeadStatus.NEW,
+    /** 家长关注点摘要（明细见 ParentConcern），随改约历史呈现给老师与顾问 */
+    var parentConcern: String? = null,
     var remark: String? = null,
     var createdAt: LocalDateTime = LocalDateTime.now()
 )

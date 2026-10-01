@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 端到端验证：线索 → 试听排班 → 反馈 → 报名转化 → 排课课消 → 请假/转班/停课 → 退费 → 校长履约轨迹
+# 端到端验证：线索 → 试听排班(多次改约容量回收/候补/主管审批) → 反馈 → 报名转化 → 排课课消 → 请假/转班/停课 → 退费 → 校长履约轨迹
 # 前置：应用已在 ${BASE:-http://localhost:8080} 运行，Redis 可用。
 set -uo pipefail
 
@@ -34,19 +34,20 @@ check "缺少 X-Role 返回 401" "$CODE" "401"
 CODE=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/principal/overview" -H "X-Role: CONSULTANT")
 check "顾问访问校长视图返回 403" "$CODE" "403"
 
-echo "== 1. 线索（幂等 + 渠道费 + 家长承诺）=="
-LEAD_BODY='{"studentName":"小明","parentPhone":"13711111111","grade":"四年级","subject":"MATH","baseLevel":"INTERMEDIATE","availableTime":"周六上午","sourceChannel":"抖音","consultantId":1,"campusId":1,"joinedActivity":true}'
+echo "== 1. 线索（幂等 + 渠道费 + 家长承诺 + 家长关注点）=="
+LEAD_BODY='{"studentName":"小明","parentPhone":"13711111111","grade":"四年级","subject":"MATH","baseLevel":"INTERMEDIATE","availableTime":"周六上午","sourceChannel":"抖音","consultantId":1,"campusId":1,"joinedActivity":true,"parentConcern":"只接受张老师，时间敏感"}'
 R1=$(post /api/leads CONSULTANT "$LEAD_BODY" -H "X-Actor: 王顾问" -H "X-Idempotency-Key: lead-xm-001")
 LEAD_A=$(echo "$R1" | jq -r '.lead.id')
 check "线索创建成功" "$(echo "$R1" | jq -r '.lead.status')" "NEW"
 check "首次创建非幂等重放" "$(echo "$R1" | jq -r '.idempotentReplay')" "false"
+check "线索带家长关注点" "$(echo "$R1" | jq -r '.lead.parentConcern')" "只接受张老师，时间敏感"
 R1B=$(post /api/leads CONSULTANT "$LEAD_BODY" -H "X-Actor: 王顾问" -H "X-Idempotency-Key: lead-xm-001")
 check "相同幂等键重放返回同一线索" "$(echo "$R1B" | jq -r '.lead.id')" "$LEAD_A"
 check "重放标记为幂等" "$(echo "$R1B" | jq -r '.idempotentReplay')" "true"
 post /api/leads/$LEAD_A/promises CONSULTANT '{"content":"保过期末数学90分","promisedBy":"王顾问"}' -H "X-Actor: 王顾问" > /dev/null
 check "家长承诺登记" "$(get /api/leads/$LEAD_A ADMIN | jq -r '.status')" "NEW"
 
-echo "== 2. 试听排班（匹配/冲突/改约/老师请假/缺席/赠品）=="
+echo "== 2. 试听排班（匹配/冲突/两次改约直接生效/第三次主管审批/容量记录）=="
 TRIAL=$(post /api/trials/book CONSULTANT "{\"leadId\":$LEAD_A,\"startTime\":\"${SAT}T10:00:00\",\"endTime\":\"${SAT}T11:00:00\"}" -H "X-Actor: 王顾问")
 TRIAL_A=$(echo "$TRIAL" | jq -r '.id')
 check "自动匹配张老师(共享校区)" "$(echo "$TRIAL" | jq -r '.teacherId')" "1"
@@ -58,11 +59,35 @@ LEAD_X=$(post /api/leads CONSULTANT '{"studentName":"冲突测试","parentPhone"
 CONFLICT=$(post /api/trials/book CONSULTANT "{\"leadId\":$LEAD_X,\"startTime\":\"${SAT}T10:00:00\",\"endTime\":\"${SAT}T11:00:00\"}" -H "X-Actor: 王顾问")
 check "同时段再约试听被拦截" "$(echo "$CONFLICT" | jq -r '.error')" "NO_TEACHER"
 
-# 改约 3 次 → 触发多次改约风险
-post /api/trials/$TRIAL_A/reschedule CONSULTANT "{\"startTime\":\"${SAT}T14:00:00\",\"endTime\":\"${SAT}T15:00:00\"}" -H "X-Actor: 王顾问" > /dev/null
-post /api/trials/$TRIAL_A/reschedule CONSULTANT "{\"startTime\":\"${SAT}T15:00:00\",\"endTime\":\"${SAT}T16:00:00\"}" -H "X-Actor: 王顾问" > /dev/null
-RSC=$(post /api/trials/$TRIAL_A/reschedule CONSULTANT "{\"startTime\":\"${SAT}T16:00:00\",\"endTime\":\"${SAT}T17:00:00\"}" -H "X-Actor: 王顾问")
-check "改约计数=3" "$(echo "$RSC" | jq -r '.rescheduleCount')" "3"
+# 第 1、2 次改约直接生效，并记录原因/临近开课/顾问确认
+RS1=$(post /api/trials/$TRIAL_A/reschedule CONSULTANT "{\"startTime\":\"${SAT}T14:00:00\",\"endTime\":\"${SAT}T15:00:00\",\"reason\":\"家长临时有事\",\"consultantConfirmed\":true}" -H "X-Actor: 王顾问")
+check "第1次改约直接生效" "$(echo "$RS1" | jq -r '.status')" "APPLIED"
+check "第1次改约计数=1" "$(echo "$RS1" | jq -r '.rescheduleCount')" "1"
+RS2=$(post /api/trials/$TRIAL_A/reschedule CONSULTANT "{\"startTime\":\"${SAT}T15:00:00\",\"endTime\":\"${SAT}T16:00:00\",\"reason\":\"孩子有其他安排\"}" -H "X-Actor: 王顾问")
+check "第2次改约直接生效" "$(echo "$RS2" | jq -r '.status')" "APPLIED"
+check "第2次改约计数=2" "$(echo "$RS2" | jq -r '.rescheduleCount')" "2"
+
+# 第 3 次改约 → 进入主管审批，试听暂不移动
+RS3=$(post /api/trials/$TRIAL_A/reschedule CONSULTANT "{\"startTime\":\"${SAT}T16:00:00\",\"endTime\":\"${SAT}T17:00:00\",\"reason\":\"家长再次改期\",\"consultantConfirmed\":true}" -H "X-Actor: 王顾问")
+APR=$(echo "$RS3" | jq -r '.approval.id')
+check "第3次改约需主管审批" "$(echo "$RS3" | jq -r '.status')" "PENDING_APPROVAL"
+check "待审批期间计数仍=2" "$(echo "$RS3" | jq -r '.rescheduleCount')" "2"
+check "待审批期间试听仍在原档位" "$(echo "$RS3" | jq -r '.trial.startTime')" "${SAT}T15:00:00"
+check_true "返回审批单ID" "$APR"
+# 待审批列表可见
+check_true "待主管审批列表含该申请" "$(get /api/trials/reschedule-approvals ADMIN | jq -r --arg a "$APR" '.[] | select(.id==($a|tonumber)) | .id')"
+# 顾问无权决策 → 403
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/trials/reschedule-approvals/$APR/decision" -H "X-Role: CONSULTANT" -H "Content-Type: application/json" -d '{"approved":true}')
+check "顾问审批第三次改约被拒(403)" "$CODE" "403"
+# 待审批期间不能重复提交改约
+DUP=$(post /api/trials/$TRIAL_A/reschedule CONSULTANT "{\"startTime\":\"${SAT}T17:00:00\",\"endTime\":\"${SAT}T18:00:00\"}" -H "X-Actor: 王顾问")
+check "待审批期间重复改约被拦截" "$(echo "$DUP" | jq -r '.error')" "APPROVAL_PENDING"
+# 主管批准 → 真正改到 16:00（无候补，释放档未被占用）
+APD=$(post /api/trials/reschedule-approvals/$APR/decision PRINCIPAL '{"approved":true,"note":"同意，仅此一次"}' -H "X-Actor: 校长")
+check "主管批准后改约生效" "$(echo "$APD" | jq -r '.status')" "APPLIED"
+check "批准后计数=3" "$(echo "$APD" | jq -r '.rescheduleCount')" "3"
+check "批准后试听移到16:00" "$(echo "$APD" | jq -r '.trial.startTime')" "${SAT}T16:00:00"
+check "释放档无候补占用" "$(echo "$APD" | jq -r '.releasedSlotTakenByWaitlist')" "false"
 
 # 老师临时请假 → 试听取消，线索回到可预约
 TL=$(post /api/trials/$TRIAL_A/teacher-leave TEACHER '{"reason":"张老师突发疾病"}' -H "X-Actor: 张老师")
@@ -80,9 +105,19 @@ TRIAL_A2=$(post /api/trials/book CONSULTANT "{\"leadId\":$LEAD_A,\"startTime\":\
 post /api/trials/$TRIAL_A2/attend CONSULTANT '{}' -H "X-Actor: 王顾问" > /dev/null
 check "到课后状态" "$(get /api/trials/$TRIAL_A2 ADMIN | jq -r '.status')" "ATTENDED"
 
-echo "== 3. 试听反馈与转化一致性校验 =="
+# 老师课前视图：跨试听聚合 3 条改约历史 + 家长关注点
+BR=$(get /api/trials/$TRIAL_A2/briefing TEACHER)
+check "老师视图改约历史=3条" "$(echo "$BR" | jq -r '.rescheduleHistory | length')" "3"
+check "第1次改约原因留痕" "$(echo "$BR" | jq -r '.rescheduleHistory[0].reason')" "家长临时有事"
+check "第3次改约带主管审批单" "$(echo "$BR" | jq -r '.rescheduleHistory[2].approvalId != null')" "true"
+check "改约记录顾问已确认" "$(echo "$BR" | jq -r '.rescheduleHistory[0].consultantConfirmed')" "true"
+check "老师可见家长关注点" "$(echo "$BR" | jq -r '.parentConcerns[0].content')" "只接受张老师，时间敏感"
+check "周末档期非临近开课" "$(echo "$BR" | jq -r '.rescheduleHistory[0].nearStart')" "false"
+
+echo "== 3. 试听反馈与转化一致性校验（反馈影响转化） =="
 FB=$(post /api/trials/$TRIAL_A2/feedback TEACHER '{"performance":"课堂专注度一般，计算能力强但概念薄弱","assessmentScore":62,"suitableClassType":"ONE_ON_ONE","suggestedLevel":"BASIC","riskWarning":"基础薄弱，不建议保分承诺"}' -H "X-Actor: 张老师")
 check "反馈提交成功" "$(echo "$FB" | jq -r '.suitableClassType')" "ONE_ON_ONE"
+check "低分+风险提醒推断为负向影响" "$(echo "$FB" | jq -r '.conversionImpact')" "NEGATIVE"
 check "线索进入试听完成" "$(get /api/leads/$LEAD_A ADMIN | jq -r '.status')" "TRIAL_DONE"
 
 # 承诺「保过」+ 班型/水平不匹配 → 直接报名应被拦截
@@ -165,11 +200,12 @@ check "退费后学员状态" "$(echo "$TL_A" | jq -r '.student.status')" "REFUN
 check "合同状态=REFUNDED" "$(echo "$TL_A" | jq -r '.contracts[0].status')" "REFUNDED"
 check "提成已追回" "$(echo "$TL_A" | jq -r '.contracts[0].commissions[0].status')" "CLAWED_BACK"
 
-echo "== 6. 第二学员：分期上限与减免 =="
+echo "== 6. 第二学员：分期上限与减免（正向反馈） =="
 LEAD_B=$(post /api/leads CONSULTANT '{"studentName":"小红","parentPhone":"13722222222","grade":"三年级","subject":"ENGLISH","baseLevel":"BASIC","availableTime":"周日下午","sourceChannel":"官网","consultantId":1,"campusId":1}' -H "X-Actor: 王顾问" | jq -r '.lead.id')
 TRIAL_B=$(post /api/trials/book CONSULTANT "{\"leadId\":$LEAD_B,\"startTime\":\"${SUN}T14:00:00\",\"endTime\":\"${SUN}T15:00:00\"}" -H "X-Actor: 王顾问" | jq -r '.id')
 post /api/trials/$TRIAL_B/attend CONSULTANT '{}' -H "X-Actor: 王顾问" > /dev/null
-post /api/trials/$TRIAL_B/feedback TEACHER '{"performance":"发音标准，互动积极","assessmentScore":85,"suitableClassType":"REGULAR","suggestedLevel":"BASIC"}' -H "X-Actor: 刘老师" > /dev/null
+FB_B=$(post /api/trials/$TRIAL_B/feedback TEACHER '{"performance":"发音标准，互动积极","assessmentScore":85,"suitableClassType":"REGULAR","suggestedLevel":"BASIC"}' -H "X-Actor: 刘老师")
+check "高分无风险推断为正向影响" "$(echo "$FB_B" | jq -r '.conversionImpact')" "POSITIVE"
 CONV_B=$(post /api/conversions CONSULTANT "{\"leadId\":$LEAD_B,\"coursePackageId\":2,\"installments\":[{\"amount\":4400,\"dueDate\":\"$SAT\"},{\"amount\":4400,\"dueDate\":\"$SAT2\"}],\"materialsDelivered\":false}" -H "X-Actor: 王顾问")
 STU_B=$(echo "$CONV_B" | jq -r '.student.id'); CT_B=$(echo "$CONV_B" | jq -r '.contract.id')
 check "无告警直接转化" "$(echo "$CONV_B" | jq -r '.consistencyWarnings | length')" "0"
@@ -208,9 +244,96 @@ check "赠课消耗：付费2+赠课1" "$(echo "$CONS_C" | jq -r '[.consumedPaid
 TL_C=$(get /api/principal/students/$STU_C/timeline PRINCIPAL)
 check_true "课时不足有告警事件" "$(echo "$TL_C" | jq -r '[.events[].type] | map(select(.=="CONSUMPTION_INSUFFICIENT")) | length')"
 
-echo "== 8. 校长履约轨迹与经营概览 =="
+echo "== 8. 改约容量回收 + 候补提升 + 原家长重新排队（SAT2 独立档期） =="
+# 持有人 H 先占 SAT2 13:00 张老师
+LEAD_H=$(post /api/leads CONSULTANT '{"studentName":"持有家长","parentPhone":"13744444444","grade":"三年级","subject":"MATH","baseLevel":"BASIC","availableTime":"周六下午","sourceChannel":"地推","consultantId":1,"campusId":1}' -H "X-Actor: 王顾问" | jq -r '.lead.id')
+TRIAL_H=$(post /api/trials/book CONSULTANT "{\"leadId\":$LEAD_H,\"teacherId\":1,\"classroomId\":1,\"startTime\":\"${SAT2}T13:00:00\",\"endTime\":\"${SAT2}T14:00:00\"}" -H "X-Actor: 王顾问" | jq -r '.id')
+check_true "持有人预约成功" "$TRIAL_H"
+# 候补学生 W 想占同一时段：约不上 → 排队
+LEAD_W=$(post /api/leads CONSULTANT '{"studentName":"候补家长","parentPhone":"13755555555","grade":"二年级","subject":"MATH","baseLevel":"BEGINNER","availableTime":"周六下午","sourceChannel":"小红书","consultantId":1,"campusId":1}' -H "X-Actor: 王顾问" | jq -r '.lead.id')
+NOWAY=$(post /api/trials/book CONSULTANT "{\"leadId\":$LEAD_W,\"startTime\":\"${SAT2}T13:00:00\",\"endTime\":\"${SAT2}T14:00:00\"}" -H "X-Actor: 王顾问")
+check "满档时段直接预约被拦截" "$(echo "$NOWAY" | jq -r '.error')" "NO_TEACHER"
+WL=$(post /api/trials/waitlist CONSULTANT "{\"leadId\":$LEAD_W,\"teacherId\":1,\"classroomId\":1,\"startTime\":\"${SAT2}T13:00:00\",\"endTime\":\"${SAT2}T14:00:00\",\"note\":\"只等张老师\"}" -H "X-Actor: 王顾问")
+WL_ID=$(echo "$WL" | jq -r '.id')
+check "加入候补成功" "$(echo "$WL" | jq -r '.status')" "WAITING"
+WL2=$(post /api/trials/waitlist CONSULTANT "{\"leadId\":$LEAD_W,\"startTime\":\"${SAT2}T13:00:00\",\"endTime\":\"${SAT2}T14:00:00\"}" -H "X-Actor: 王顾问")
+check "同时段重复候补被拦截" "$(echo "$WL2" | jq -r '.error')" "DUPLICATE"
+# 仍有空档的时段不允许候补
+FREE=$(post /api/trials/waitlist CONSULTANT "{\"leadId\":$LEAD_W,\"startTime\":\"${SAT3}T09:00:00\",\"endTime\":\"${SAT3}T10:00:00\"}" -H "X-Actor: 王顾问")
+check "有空档时段拒绝候补引导直约" "$(echo "$FREE" | jq -r '.error')" "SLOT_AVAILABLE"
+
+# 持有人改约 13:00 → 09:00（第1次直接生效）：释放 13:00，候补队首自动顶上
+RSH=$(post /api/trials/$TRIAL_H/reschedule CONSULTANT "{\"teacherId\":1,\"classroomId\":1,\"startTime\":\"${SAT2}T09:00:00\",\"endTime\":\"${SAT2}T10:00:00\",\"reason\":\"家长要更早的时段\"}" -H "X-Actor: 王顾问")
+check "持有人改约生效" "$(echo "$RSH" | jq -r '.status')" "APPLIED"
+check "释放档位被候补占用" "$(echo "$RSH" | jq -r '.releasedSlotTakenByWaitlist')" "true"
+PROMOTED_ID=$(echo "$RSH" | jq -r '.promotedWaitlistTrialId')
+check_true "返回候补转正的试听ID" "$PROMOTED_ID"
+# 候补记录已转正并绑定新试听
+check "候补状态=PROMOTED" "$(get "/api/trials/waitlist?leadId=$LEAD_W" ADMIN | jq -r --arg w "$WL_ID" '.[] | select(.id==($w|tonumber)) | .status')" "PROMOTED"
+check "候补转正绑定试听ID" "$(get "/api/trials/waitlist?leadId=$LEAD_W" ADMIN | jq -r --arg w "$WL_ID" '.[] | select(.id==($w|tonumber)) | .promotedTrialId')" "$PROMOTED_ID"
+check "候补转正占用释放的老师" "$(get /api/trials/$PROMOTED_ID ADMIN | jq -r '.teacherId')" "1"
+check "候补转正占用释放的时段" "$(get /api/trials/$PROMOTED_ID ADMIN | jq -r '.startTime')" "${SAT2}T13:00:00"
+check "候补学生线索已排试听" "$(get /api/leads/$LEAD_W ADMIN | jq -r '.status')" "TRIAL_SCHEDULED"
+# 原家长再选被占的 13:00 → 必须重新排队
+RETRY=$(post /api/trials/book CONSULTANT "{\"leadId\":$LEAD_H,\"startTime\":\"${SAT2}T13:00:00\",\"endTime\":\"${SAT2}T14:00:00\"}" -H "X-Actor: 王顾问")
+check "原家长再选被占时段需重新排队" "$(echo "$RETRY" | jq -r '.error')" "SLOT_TAKEN_REQUEUE"
+# 原家长重新排队成功
+RQWL=$(post /api/trials/waitlist CONSULTANT "{\"leadId\":$LEAD_H,\"teacherId\":1,\"startTime\":\"${SAT2}T13:00:00\",\"endTime\":\"${SAT2}T14:00:00\"}" -H "X-Actor: 王顾问")
+check "原家长重新候补成功" "$(echo "$RQWL" | jq -r '.status')" "WAITING"
+# 取消该候补
+CANWL=$(post /api/trials/waitlist/$(echo "$RQWL" | jq -r '.id')/cancel CONSULTANT '{}' -H "X-Actor: 王顾问")
+check "取消候补成功" "$(echo "$CANWL" | jq -r '.status')" "CANCELLED"
+# 顾问端转化风险视图：容量变化带来的风险可见
+RISK=$(get /api/trials/risks CONSULTANT)
+check "风险视图含档位被占的线索" "$(echo "$RISK" | jq -r --arg l "$LEAD_H" '[.[] | select(.leadId==($l|tonumber))] | length')" "1"
+check "风险条目标记releasedSlotTaken" "$(echo "$RISK" | jq -r --arg l "$LEAD_H" '[.[] | select(.leadId==($l|tonumber))][0].releasedSlotTaken')" "true"
+check_true "风险条目给出容量风险原因" "$(echo "$RISK" | jq -r --arg l "$LEAD_H" '[.[] | select(.leadId==($l|tonumber))][0].riskReasons[0]')"
+
+echo "== 9. 第三次改约主管驳回（维持原档期，可重新提交） =="
+LEAD_D=$(post /api/leads CONSULTANT '{"studentName":"驳回测试","parentPhone":"13766666666","grade":"一年级","subject":"MATH","baseLevel":"BEGINNER","availableTime":"周日","sourceChannel":"官网","consultantId":1,"campusId":1}' -H "X-Actor: 王顾问" | jq -r '.lead.id')
+TRIAL_D=$(post /api/trials/book CONSULTANT "{\"leadId\":$LEAD_D,\"teacherId\":1,\"startTime\":\"${SUN}T09:00:00\",\"endTime\":\"${SUN}T10:00:00\"}" -H "X-Actor: 王顾问" | jq -r '.id')
+post /api/trials/$TRIAL_D/reschedule CONSULTANT "{\"startTime\":\"${SUN}T11:00:00\",\"endTime\":\"${SUN}T12:00:00\"}" -H "X-Actor: 王顾问" > /dev/null
+post /api/trials/$TRIAL_D/reschedule CONSULTANT "{\"startTime\":\"${SUN}T13:00:00\",\"endTime\":\"${SUN}T14:00:00\"}" -H "X-Actor: 王顾问" > /dev/null
+RD3=$(post /api/trials/$TRIAL_D/reschedule CONSULTANT "{\"startTime\":\"${SUN}T15:00:00\",\"endTime\":\"${SUN}T16:00:00\",\"reason\":\"第三次想改\"}" -H "X-Actor: 王顾问")
+APR_D=$(echo "$RD3" | jq -r '.approval.id')
+check "第3次改约进入审批" "$(echo "$RD3" | jq -r '.status')" "PENDING_APPROVAL"
+REJ=$(post /api/trials/reschedule-approvals/$APR_D/decision ADMIN '{"approved":false,"note":"热门档期，驳回"}' -H "X-Actor: 教务主管")
+check "主管驳回" "$(echo "$REJ" | jq -r '.status')" "REJECTED"
+check "驳回后维持原档期(13:00)" "$(echo "$REJ" | jq -r '.trial.startTime')" "${SUN}T13:00:00"
+check "驳回后计数仍=2" "$(echo "$REJ" | jq -r '.rescheduleCount')" "2"
+# 驳回后允许重新提交第三次
+RD4=$(post /api/trials/$TRIAL_D/reschedule CONSULTANT "{\"startTime\":\"${SUN}T17:00:00\",\"endTime\":\"${SUN}T18:00:00\"}" -H "X-Actor: 王顾问")
+check "驳回后可重新提交审批" "$(echo "$RD4" | jq -r '.status')" "PENDING_APPROVAL"
+
+echo "== 10. 临近开课改约记录（24h 内） =="
+# 给张老师补一条覆盖目标星期的全天空档，使“数小时后”的时段可预约（不影响其他按占用判定的断言）
+for DOW in 1 2 3 4 5 6 7; do
+  post /api/setup/teachers/1/availability ADMIN "{\"dayOfWeek\":$DOW,\"startTime\":\"00:00:00\",\"endTime\":\"23:59:00\"}" > /dev/null
+done
+S1_E=$(( ($(date -d '+3 hours' +%s) / 3600) * 3600 ))
+S1=$(date -d "@$S1_E" +%FT%T)
+E1=$(date -d "@$((S1_E+3600))" +%FT%T)
+S2N=$(date -d "@$((S1_E+7200))" +%FT%T)
+E2N=$(date -d "@$((S1_E+10800))" +%FT%T)
+LEAD_N=$(post /api/leads CONSULTANT '{"studentName":"临近测试","parentPhone":"13777777777","grade":"一年级","subject":"MATH","baseLevel":"BEGINNER","availableTime":"随时","sourceChannel":"地推","consultantId":1,"campusId":1}' -H "X-Actor: 王顾问" | jq -r '.lead.id')
+TN=$(post /api/trials/book CONSULTANT "{\"leadId\":$LEAD_N,\"teacherId\":1,\"classroomId\":1,\"startTime\":\"$S1\",\"endTime\":\"$E1\"}" -H "X-Actor: 王顾问" | jq -r '.id')
+RN=$(post /api/trials/$TN/reschedule CONSULTANT "{\"teacherId\":1,\"classroomId\":1,\"startTime\":\"$S2N\",\"endTime\":\"$E2N\",\"reason\":\"临开课前改期\"}" -H "X-Actor: 王顾问")
+check "临近开课改约直接生效(第1次)" "$(echo "$RN" | jq -r '.status')" "APPLIED"
+NEAR=$(get /api/trials/$TN/briefing TEACHER)
+check "改约记录标记临近开课=true" "$(echo "$NEAR" | jq -r '.rescheduleHistory[0].nearStart')" "true"
+
+echo "== 11. 试听反馈影响线索转化统计 =="
+STATS=$(get /api/trials/conversion-stats ADMIN)
+check_true "总体转化率字段存在" "$(echo "$STATS" | jq -r '.conversionRate')"
+check "负向反馈线索≥1且已转化(小明)" "$(echo "$STATS" | jq -r '.byFeedbackImpact[] | select(.impact=="NEGATIVE") | .feedbackLeads')" "1"
+check "负向反馈组转化数=1" "$(echo "$STATS" | jq -r '.byFeedbackImpact[] | select(.impact=="NEGATIVE") | .converted')" "1"
+check "正向反馈线索≥2(小红/小刚)" "$(echo "$STATS" | jq -r '.byFeedbackImpact[] | select(.impact=="POSITIVE") | .feedbackLeads')" "2"
+check "3次及以上改约桶含小明且转化" "$(echo "$STATS" | jq -r '.byRescheduleCount[] | select(.rescheduleRange=="3次及以上") | .converted')" "1"
+check "档位被回收线索≥1" "$(echo "$STATS" | jq -r '.slotReclaimedLeads.leads')" "1"
+
+echo "== 12. 校长履约轨迹与经营概览 =="
 EV=$(echo "$TL_A" | jq -r '[.events[].type] | unique | join(",")')
-for E in LEAD_CREATED CHANNEL_FEE PROMISE_RECORDED TRIAL_BOOKED TRIAL_RESCHEDULED TRIAL_RESCHEDULE_RISK TRIAL_TEACHER_LEAVE GIFT_GRANTED TRIAL_ATTENDED FEEDBACK_SUBMITTED CONSISTENCY_WARNING CONVERTED CONTRACT_CREATED INSTALLMENT_PAID INVOICE_ISSUED COMMISSION_ACCRUED ENROLLED CONSUMPTION CONSUMPTION_REVERSED LEAVE_APPROVED TRANSFERRED SUSPENDED RESUMED COMPLAINT_FILED REFUND_REQUESTED COMMISSION_FROZEN REFUND_PAID COMMISSION_CLAWED_BACK; do
+for E in LEAD_CREATED CHANNEL_FEE PROMISE_RECORDED PARENT_CONCERN_RECORDED TRIAL_BOOKED TRIAL_RESCHEDULED TRIAL_RESCHEDULE_RISK TRIAL_RESCHEDULE_APPROVAL_PENDING TRIAL_RESCHEDULE_APPROVAL_APPROVED TRIAL_TEACHER_LEAVE GIFT_GRANTED TRIAL_ATTENDED FEEDBACK_SUBMITTED TRIAL_CONVERSION_RISK CONSISTENCY_WARNING CONVERTED CONTRACT_CREATED INSTALLMENT_PAID INVOICE_ISSUED COMMISSION_ACCRUED ENROLLED CONSUMPTION CONSUMPTION_REVERSED LEAVE_APPROVED TRANSFERRED SUSPENDED RESUMED COMPLAINT_FILED REFUND_REQUESTED COMMISSION_FROZEN REFUND_PAID COMMISSION_CLAWED_BACK; do
   check_true "轨迹含事件 $E" "$(echo "$EV" | grep -o "$E")"
 done
 check "轨迹含赠品记录" "$(echo "$TL_A" | jq -r '.gifts[0].status')" "GRANTED"

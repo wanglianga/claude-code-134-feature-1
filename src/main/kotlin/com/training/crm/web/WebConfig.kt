@@ -41,6 +41,16 @@ class RoleInterceptor : HandlerInterceptor {
             response.writer.write("""{"error":"FORBIDDEN","message":"校长视图仅 PRINCIPAL/ADMIN 可访问"}""")
             return false
         }
+        // 第三次改约的主管审批决策仅 ADMIN/PRINCIPAL 可执行（顾问只能提交申请）
+        if (request.method == "POST" &&
+            request.requestURI.matches(Regex(".*/api/trials/reschedule-approvals/\\d+/decision")) &&
+            role != "PRINCIPAL" && role != "ADMIN"
+        ) {
+            response.status = HttpStatus.FORBIDDEN.value()
+            response.contentType = "application/json;charset=UTF-8"
+            response.writer.write("""{"error":"FORBIDDEN","message":"第三次改约审批仅主管(PRINCIPAL/ADMIN)可决策"}""")
+            return false
+        }
         return true
     }
 }

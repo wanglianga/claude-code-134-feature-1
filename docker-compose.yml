@@ -1,0 +1,28 @@
+# 一键启动：docker compose up --build
+# 包含 training-crm 应用与 Redis（分布式锁/幂等）。H2 使用内存库，随应用启动自动播种。
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: training-crm-redis
+    ports:
+      - "6379:6379"
+    command: ["redis-server", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: training-crm-app
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    ports:
+      - "8080:8080"

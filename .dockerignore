@@ -1,0 +1,7 @@
+target/
+.git/
+*.log
+.idea/
+*.iml
+.claude/
+scripts/

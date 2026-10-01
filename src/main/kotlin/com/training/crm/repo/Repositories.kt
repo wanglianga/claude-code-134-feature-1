@@ -41,6 +41,22 @@ interface TrialClassRepo : JpaRepository<TrialClass, Long> {
 interface TrialFeedbackRepo : JpaRepository<TrialFeedback, Long> {
     fun findByTrialClassId(trialClassId: Long): TrialFeedback?
 }
+interface TrialRescheduleRecordRepo : JpaRepository<TrialRescheduleRecord, Long> {
+    fun findByTrialClassIdOrderBySeqAsc(trialClassId: Long): List<TrialRescheduleRecord>
+    fun findByLeadIdOrderByCreatedAtAsc(leadId: Long): List<TrialRescheduleRecord>
+}
+interface TrialWaitlistEntryRepo : JpaRepository<TrialWaitlistEntry, Long> {
+    fun findByStatusOrderByCreatedAtAsc(status: WaitlistStatus): List<TrialWaitlistEntry>
+    fun findByLeadIdAndStatus(leadId: Long, status: WaitlistStatus): List<TrialWaitlistEntry>
+}
+interface TrialScheduleApprovalRepo : JpaRepository<TrialScheduleApproval, Long> {
+    fun findByStatusOrderByCreatedAtAsc(status: TrialApprovalStatus): List<TrialScheduleApproval>
+    fun findByTrialClassIdAndStatus(trialClassId: Long, status: TrialApprovalStatus): List<TrialScheduleApproval>
+}
+interface ParentConcernRepo : JpaRepository<ParentConcern, Long> {
+    fun findByLeadIdOrderByIdAsc(leadId: Long): List<ParentConcern>
+    fun findByTrialClassId(trialClassId: Long): List<ParentConcern>
+}
 
 interface StudentRepo : JpaRepository<Student, Long>
 interface CoursePackageRepo : JpaRepository<CoursePackage, Long>
